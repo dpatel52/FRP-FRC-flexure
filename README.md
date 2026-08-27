@@ -3,46 +3,35 @@
 [![Python Versions](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org)&nbsp;
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A **closed-form** solution for the flexural response of **FRC** and **UHPC** sections reinforced with **FRP bars**.
-Three stages, explicit expressions for the neutral axis and the moment in each, no iteration anywhere.
+**Closed-form** flexural response of FRC and UHPC sections reinforced with steel or FRP bars, with an optional externally bonded FRP skin that activates after the section has already been strained.
+
+Fourteen zones, each solved once symbolically, so the response at any strain increment follows by substitution rather than by iteration.
 
 Cite Correct Reference: *Generalized Solutions for Strain Compatibility-Based Flexural Design of Doubly Reinforced Concrete Beams with FRP Composites*, Patel, Pleesudjai and Mobasher (DOI to follow).
 
 It calculates
 
-* **Moment-curvature** envelopes
+* **Moment-curvature** envelopes across all fourteen zones
 * **Neutral axis** depth through the loading history
-* **Limit states**, first cracking, compression yield, crushing and bar rupture
-* **Secant stiffness** at any load level
+* **Stage sequence**, which subsystem changed state and where
+* **Strain histories** at the top fibre and at the bar
 
 ---
 
-## Why three stages and not four
+## The model
 
-The steel derivation needs four because the bar yields. An FRP bar is linear elastic to rupture, so the yielded-bar stage disappears.
+Four subsystems each carry their own state, and the zone is the combination of the four.
 
-| Stage | Tension | Compression | Enters when |
-|---|---|---|---|
-| 1 | elastic, uncracked | elastic | `beta <= 1` |
-| 2 | cracked | elastic | `beta k / (1 - k) < omega` |
-| 3 | cracked | plastic | `beta k / (1 - k) >= omega` |
+| | states | changes at |
+|---|---|---|
+| `T` tension in the matrix | 1 to 4 | `beta` = 1, `beta_1`, `beta_2` |
+| `C` compression in the matrix | 1 to 2 | compressive yield strain |
+| `R` tension bar | 1 to 2 | bar yield |
+| `RC` compression bar | 1 to 2 | yield, inside `T` = 4 only |
 
----
+The matrix carries a quad-linear tension law through `(beta_i, mu_i)` and a bilinear compression law through `omega` and `mu_c`. The bar is bilinear through `eps_sy` and `mu_s`, and becomes linear elastic to rupture when `mu_s = 1`, which is how an FRP bar is entered. The bonded skin adds `psi`, `rho_x` and the activation strain `iota`, and creates no new zone.
 
-## Parameters
-
-Six dimensionless quantities describe any section, and `beta = eps_bot / eps_cr` sets the load level.
-
-```
-n     = E_f / E              rho   = A_f / (b h)        alpha = d / h
-mu    = sigma_res / sigma_cr omega = eps_cy / eps_cr    M_cr  = sigma_cr b h^2 / 6
-```
-
-The bar appears only as the product `n rho`, so modulus and area are interchangeable in equilibrium. Three shorthand groups keep every expression to one line.
-
-```
-q = 2 mu (beta - 1) + 1        r = q + omega^2        s = 3 mu (beta^2 - 1) + 2
-```
+Each hardening slope carries the stress at the start of its own branch, so `eta_c` is scaled by `omega` and `eta_s` by `kappa`. The tension slopes need no such factor, since normalisation makes the stress exactly unity at first cracking.
 
 ---
 
@@ -61,47 +50,66 @@ Only `numpy` is required. `matplotlib` is needed for the examples and `pytest` f
 ## Quick-start
 
 ```python
-from frp_flexure import run_model
+from frp_flexure import run_full_model
 
-res = run_model(
+res = run_full_model(
     # Geometry
-    b = 250.0,        # mm
-    h = 400.0,        # mm
-    d = 354.5,        # mm
+    b = 250.0, h = 400.0, cover = 45.5, L = 3836.0,     # mm
 
-    # Matrix
-    E         = 31529.0,   # MPa
-    sigma_cr  = 4.025,     # MPa, 0.60 sqrt(f_c) where no direct tension test exists
-    sigma_res = 0.587,     # MPa, f_D150 / 3 from ASTM C1609, or 0 for a plain matrix
-    f_c       = 45.0,      # MPa
+    # Matrix, quad-linear tension and bilinear compression
+    E = 31528.6, epsilon_cr = 1.27658e-4,
+    mu_1 = 0.146, mu_2 = 0.146, mu_3 = 0.146,
+    beta_1 = 2.0, beta_2 = 50.0, beta_3 = 300.0,
+    xi = 1.001, omega = 11.18, mu_c = 1.0, eps_cu = 0.005,
 
-    # FRP bars
-    E_f = 61200.0,    # MPa
-    A_f = 507.0,      # mm2
+    # Bars. mu_s = 1 makes the bar linear elastic to rupture, i.e. FRP
+    E_bar = 61200.0, eps_sy = 0.0174, mu_s = 1.0, eps_su = 0.0175,
+    rho_t = 507.0 / (250.0 * 400.0), rho_c = 0.0,
 
-    # Limits, either may be None to leave that one unchecked
-    eps_cu = 0.005,
-    eps_fu = 0.0174,
+    # Bonded FRP skin, omit for an unstrengthened section
+    E_skin = 209000.0, A_skin = 105.6, iota = 10.0,
 )
 
-res["phi"]        # curvature, 1/mm
-res["M"]          # moment, N-mm
-res["k"]          # neutral axis ratio
-res["governing"]  # 'crushing' or 'bar_rupture'
-res["events"]     # index and beta of each limit state reached
+res["phi"]    # curvature, 1/mm
+res["M"]      # moment, N-mm
+res["k"]      # neutral axis ratio
+res["stage"]  # the zone active at each step, e.g. '4221'
 ```
 
-`examples/Shabani_et_al_(2025).py` runs a measured beam end to end and plots the response.
+`xi` must differ from 1. The zone expressions divide by `(xi - 1)`, and 1.001 is the usual choice for concrete.
 
 ---
 
-## The equations
+## Three stage reduction
 
-`frp_flexure/equations.py` carries them directly. Stage 1 is explicit and independent of `beta`. Stages 2 and 3 are each a single closed form, and in both **the minus branch on the radical is the root in (0,1)**. The sign is fixed by admissibility, not by the algebra, since both branches satisfy the same quadratic. The plus branch of stage 3 returns `k` just above 1, which puts the neutral axis below the tension face.
+For a bilinear tension law and a bar that never yields, the fourteen zones collapse to three and every result fits on one line. `frp_flexure/equations.py` carries that form, and `run_model` drives it.
 
-`frp_flexure/envelope.py` sweeps `beta`, picks the active stage at each step and terminates the response at whichever limit the section reaches first.
+```python
+from frp_flexure import run_model
+res = run_model(b=250.0, h=400.0, d=354.5, E=31529.0, sigma_cr=4.025,
+                sigma_res=0.587, f_c=45.0, E_f=61200.0, A_f=507.0,
+                eps_cu=0.005, eps_fu=0.0174)
+```
 
-The stages carry no failure strain of their own, so termination is external. Left unterminated the stage 3 root stays admissible, it just stops meaning anything, `k` drifts up toward `alpha` and the compression block is asked to carry the section on its own.
+Three shorthand groups hold the expressions to one line each.
+
+```
+q = 2 mu (beta - 1) + 1        r = q + omega^2        s = 3 mu (beta^2 - 1) + 2
+```
+
+In stages 2 and 3 **the minus branch on the radical is the root in (0,1)**. The sign is fixed by admissibility, not by the algebra, since both branches satisfy the same quadratic. The plus branch of stage 3 returns `k` just above 1, which puts the neutral axis below the tension face.
+
+---
+
+## Where the zone equations come from
+
+`frp_flexure/zones.py` is generated from the MATLAB sources by `tools/translate_zones.py`, which does operator substitution only. The expressions are Maple output, thousands of characters each, and are never retyped by hand. `sqrt` is emitted as `np.emath.sqrt`, because MATLAB returns a complex root for a negative argument and these expressions rely on it, taking the real part at the end.
+
+To regenerate after changing the MATLAB:
+
+```bash
+python tools/translate_zones.py <matlab_dir> frp_flexure/zones.py
+```
 
 ---
 
@@ -111,19 +119,28 @@ The stages carry no failure strain of their own, so termination is external. Lef
 python -m pytest -q
 ```
 
-The equations are checked against direct force and moment integration of the same laws. The integrator shares no algebra with them, it walks the depth and sums, so agreement is evidence rather than a tautology.
+Two independent checks, 35 tests.
 
-| Check | Result |
+**Against MATLAB.** Every zone is evaluated in MATLAB over twelve random parameter sets and eight values of `beta`, and the assembled envelope is built for three further cases, one plain and two carrying a bonded skin. The Python then replays exactly those inputs.
+
+| | worst relative error |
 |---|---|
-| Stage 1 against integration, no kink in the stress field | `k` to 1e-12 |
-| Stages 2 and 3 against integration | at the quadrature floor, `k` under 1e-5 |
-| 400 random sections spanning all three stages | every root in (0,1) |
-| Stage 2 and stage 3 roots at the transition | agree to 1e-9 |
-| `rho` to zero, and a bar on the elastic axis | `k = 1/2` exactly |
-| Worked example against the measured beam | reproduces the published values |
+| `k`, all fourteen zones, 1344 states | 3.3e-16 |
+| `M`, all fourteen zones, 1344 states | 8.1e-11 |
+| full envelope, 3 cases, 5100 points | under 1e-9 |
+
+**Against integration.** The three stage form is checked against direct force and moment integration of the same laws. The integrator shares no algebra with the equations, it walks the section depth and sums, so agreement is evidence rather than a tautology. Stage 1 agrees in `k` to 1e-12, and across 400 random sections every root returned lies in (0,1).
+
+Regenerate the MATLAB reference with
+
+```bash
+matlab -batch "addpath('<matlab_dir>'); dump_matlab_reference; dump_matlab_envelope"
+```
+
+The reference CSVs are committed, so the tests run without MATLAB installed.
 
 ---
 
 ## Scope
 
-This release is the closed-form sectional solution only. It does not carry bond slip, interfacial debonding, shear, or the externally bonded laminate of the parent formulation. A member that fails by any of those routes is outside what these equations describe.
+Sectional response only. There is no bond slip, no interfacial debonding and no shear. A member that fails by any of those routes is outside what these equations describe, and the bonded skin is carried as a linear elastic layer with a rupture strain and no interfacial limit.
